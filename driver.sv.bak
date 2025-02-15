@@ -1,0 +1,105 @@
+//////////////////////////////////////////////////////////////////////////////////
+// Company: 
+// Engineer: 
+// 
+// Create Date:    
+// Design Name: 
+// Module Name:    driver 
+// Project Name: 
+// Target Devices: 
+// Tool versions: 
+// Description: 
+//
+// Dependencies: 
+//
+// Revision: 
+// Revision 0.01 - File Created
+// Additional Comments: 
+//
+//////////////////////////////////////////////////////////////////////////////////
+module driver(
+    input clk,
+    input rst,
+    input [1:0] br_cfg,
+    output logic iocs,
+    output logic iorw,
+    input rda,
+    input tbr,
+    output logic [1:0] ioaddr,
+    inout [7:0] databus
+    );
+
+typedef enum reg [1:0] {IDLE, TX, CFG1, CFG2} state_t;
+state_t state, nxt_state;
+
+logic [7:0] databus_out;
+logic [7:0] baud_cnt;
+logic [7:0] tx_data;
+assign databus = !iorw ? databus_out : 1'bz;
+
+
+always_ff @(posedge clk, negedge rst) begin
+    if (!rst) state <= IDLE;
+    else state <= nxt_state;
+end
+
+
+always_ff @(posedge clk, negedge rst) begin
+    if (!rst) databus_out <= 0;
+    else if (rda) databus_out <= databus;
+    else if (state == CFG1 || state == CFG2) databus_out <= baud_cnt;
+end
+
+always_comb begin
+    iocs = 1;
+    iorw = 1;
+    ioaddr = 2'b00;
+    nxt_state = state;
+    case (state)
+        IDLE: begin
+            if (tbr) nxt_state = CFG1;
+        end
+        TX: begin
+            iorw = 0;
+            nxt_state = IDLE;
+        end
+        CFG1: begin
+            ioaddr = 2'b10;
+            case (br_cfg)
+                2'b00: begin
+                    baud_cnt = 8'hb0;
+                2'b01: begin
+                    baud_cnt = 8'h58;
+                end
+                2'b10: begin
+                    baud_cnt = 8'h2c;
+                end
+                2'b11: begin
+                    baud_cnt = 8'h16;
+                end
+            endcase
+            nxt_state = CFG2;
+        end
+        CFG2: begin
+            ioaddr = 2'b11;
+            case (br_cfg)
+                2'b00: begin
+                    baud_cnt = 8'h28;
+                end
+                2'b01:begin
+                    baud_cnt = 8'h14;
+                end
+                2'b10: begin
+                    baud_cnt = 8'h0a;
+                end
+                2'b11: begin
+                    baud_cnt = 8'h05;
+                end
+            endcase
+            nxt_state  = TX;
+        end
+    endcase
+end
+
+
+endmodule
