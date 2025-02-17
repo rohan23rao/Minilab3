@@ -1,105 +1,114 @@
-`default_nettype none
-module UART_rx
-(
-input wire clk, rst_n, RX, clr_rdy,
-input wire [15:0] baud_val,
-output logic [7:0] rx_data,
-output logic rdy
+module UART_rx(
+	input [15:0] baud_val,
+    input clk, // clock signals
+    input rst_n, // active low reset
+    input clr_rdy, // clear ready
+    output [7:0] rx_data, // data received
+    input RX, // data input
+    output reg rdy // ready signal when byte received
 );
+// define states we need, IDLE and RX_ST
+typedef enum logic [1:0] {IDLE,  RX_ST} state_t;
 
+logic [3:0] bit_cnt; // bit count
+logic [15:0] baud_cnt; // baud rate count
+logic [8:0] rx_shft_reg; // shift in register
+logic shift; // shift signal
+logic start; // start shifting in next byte
+logic receiving; // in the process of receiving
+logic set_rdy; // set rdy
+logic f_RX; // single flop RX
+logic df_RX; // double flop RX to rule out metastability
+state_t cur_state; // current state
+state_t nxt_state; // next state
 
-
-logic shift;
-    //outputs of state machine
-    logic start;
-    logic receiving;
-    logic set_rdy;
-
-    logic [8:0] rx_shft_reg; //9 bits old signal
-    logic [15:0] baud_cnt;
-    logic [3:0] bit_cnt;
-
-    logic RX_FF2; //back to back flops for meta-stability
-    logic RX_FF1;
-
-// double flop RX to avoid meta-stability
-	always_ff @(posedge clk, negedge rst_n)begin
-		if(!rst_n) begin
-			// pre set RX_sync for UART
-			RX_FF1 <= 1'b1;
-			RX_FF2 <= 1'b1;
-		end else begin
-			RX_FF1 <= RX;
-			RX_FF2 <= RX_FF1;
-		end
-end
-// the shift register	
-	
-always_ff @(posedge clk)begin
-		if(shift)
-			rx_shft_reg <= {RX_FF2, rx_shft_reg[8:1]};		// append the data with a start bit
-end
-	assign rx_data = rx_shft_reg[7:0];		// output the received byte
-// the baud counter
-always_ff @(posedge clk) begin
-		if(start)
-			baud_cnt <= {1'b0, baud_val[15:1]};		// set the baud counter to half of a baud period at the start of a receiving
-		else if(shift)
-			baud_cnt <= baud_val;		// set the baud counter to the full baud period when shifting
-		else if(receiving)
-			baud_cnt <= baud_cnt - 1;		// count up when transmitting
-			
-end			
-    assign shift = ~|baud_cnt; //shift when baud_cnt is zero	
-
-// The bit counter
-always_ff @(posedge clk) begin
-        if(start)
-            bit_cnt <= 4'h0;
-        else if(shift)
-            bit_cnt <= bit_cnt + 1;
+// RX flop, preset to be able to detect start bit
+always_ff @(posedge clk, negedge rst_n) begin
+    if (~rst_n) begin
+        df_RX <= 1;
+        f_RX <= 1;
     end
-	
-	
-typedef enum reg { IDLE, RX_STATE } state_t;
-    state_t state, nxt_state;
-    always_ff @( posedge clk, negedge rst_n ) begin
-        if(!rst_n)
-            state <= IDLE;
-        else
-            state <= nxt_state;
+    else begin
+        df_RX <= f_RX;
+        f_RX <= RX;
     end
+end
+
+// bit count, clear when started, increment when shifting
+always_ff @(posedge clk) begin
+    if (start) begin
+        bit_cnt <= '0;
+    end
+    else if (shift) begin
+        bit_cnt <= bit_cnt + 1;
+    end
+end
+
+// counting baud rate, decrement and reset while shifting each bit
+always_ff @(posedge clk) begin
+    if (start | shift) begin
+        if (start) baud_cnt <= baud_val/2;
+        else baud_cnt <= baud_val;
+    end
+    else if (receiving) baud_cnt <= baud_cnt - 1;
+end
+
+// shift in data to shift register when shift time
+always_ff @(posedge clk) begin
+    if (shift) begin
+        rx_shft_reg <= {df_RX, rx_shft_reg[8:1]};
+    end
+end
+
+// In order, set assert or clear rdy
+always_ff @(posedge clk, negedge rst_n) begin
+    if (~rst_n) begin
+        rdy <= 0;
+    end
+    else if (clr_rdy) rdy <= 0;
+    else if (set_rdy) rdy <= 1;
+    else if (start) rdy <= 0;
+end
+
+// dataflow for simple combinational logic of shift and rx_data
+assign rx_data = rx_shft_reg[7:0];
+assign shift = (baud_cnt == 0)?1'b1:1'b0;
+
+// state flops
+always_ff @(posedge clk, negedge rst_n) begin
+    if (~rst_n) cur_state <= IDLE;
+    else cur_state <= nxt_state;
+end
+
+// state transition combinational logic
 always_comb begin
-        start = 1'b0;
-        receiving = 1'b0;
-        set_rdy = 1'b0;
-        nxt_state = state; 
-		
-		
-	case(state)
-		RX_STATE: begin
-			receiving = 1'b1;
-			if(bit_cnt == 4'd10) begin		// finish receiving when all 10 bits are received
-				set_rdy = 1'b1;
-				nxt_state = IDLE;
-			end
-		end
-		default:		
-			if(RX_FF2 == 1'b0) begin			// wait until RX is low to begin receiving
-				start = 1'b1;
-				nxt_state = RX_STATE;
-			end
-	endcase
+    // default values
+    receiving = 1'b0;
+    start = 1'b0;
+    set_rdy = 1'b0;
+    nxt_state = IDLE;
+    // discussing states
+    case (cur_state)
+        // in IDLE only move when there is a start bit
+        IDLE: begin
+            if (~df_RX) begin
+                nxt_state = RX_ST;
+                start = 1'b1; // start when start bit received
+            end
+        end
+        // in RX_ST, assert receiving before bit count is 10
+        RX_ST: begin
+            receiving = 1'b1;
+            if (bit_cnt == 10) begin
+                nxt_state = IDLE;
+                set_rdy = 1'b1; // 10 bits arrived, ready
+            end
+            else nxt_state = RX_ST;
+        end
+        default:
+        // go to IDLE by default
+        nxt_state = IDLE;
+    endcase
 end
 
-// S/R reg to set TX_done
-always_ff @(posedge clk, negedge rst_n)begin
-		if(!rst_n)
-			rdy <= 1'b0;
-		else if(start | clr_rdy)
-			rdy <= 1'b0;
-		else if(set_rdy)
-			rdy <= 1'b1;
-end	
 endmodule
-`default_nettype wire

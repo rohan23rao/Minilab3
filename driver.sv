@@ -29,16 +29,13 @@ module driver(
     inout [7:0] databus
     );
 
-typedef enum reg [2:0] {IDLE, TX, CFG2, TX_START, RX_READ} state_t;
-state_t state, nxt_state;
-
 logic [7:0] databus_out;
-logic [7:0] databus_ff;
-logic [7:0] baud_cnt;
-logic [7:0] tx_data;
-assign databus = (!iorw) ? databus_out : 8'hzz;
+logic [7:0] databus_in;
+assign databus = (~iorw) ? databus_out : 8'bzzzzzzzz;
 
-assign databus_out = (!rst) ? 0 : (state == TX_START) ? databus_ff : (state == IDLE || state == CFG2) ? baud_cnt : 0;
+
+typedef enum reg [2:0] {IDLE, RX_READ, CFG1, CFG2, TX} state_t;
+state_t state, nxt_state;
 
 always_ff @(posedge clk, negedge rst) begin
     if (!rst) state <= IDLE;
@@ -46,71 +43,56 @@ always_ff @(posedge clk, negedge rst) begin
 end
 
 always_ff @(posedge clk, negedge rst) begin
-    if (!rst) databus_ff <= 0;
-    else if (rda & iorw) databus_ff <= databus;
+    if (!rst) databus_in <= 0;
+    else if (iorw) databus_in <= databus;
 end
 
 always_comb begin
-    iocs = 1;
     iorw = 1;
+    iocs = 1;
     ioaddr = 2'b00;
-    nxt_state = state;
-	baud_cnt = 0;
-    case (state)
+    databus_out = 0;
+	 nxt_state = state;
+    case (state) 
         IDLE: begin
-            ioaddr = 2'b10;
+            nxt_state = CFG1;
+        end
+        RX_READ: begin
+            nxt_state = TX;
+        end
+        CFG1: begin
             iorw = 0;
+            ioaddr = 2'b10;
             case (br_cfg)
-                2'b00: begin
-                    baud_cnt = 8'hb0;
-					 end
-                2'b01: begin
-                    baud_cnt = 8'h58;
-                end
-                2'b10: begin
-                    baud_cnt = 8'h2c;
-                end
-                2'b11: begin
-                    baud_cnt = 8'h16;
-                end
+                2'b00: databus_out = 8'hb0;
+                2'b01: databus_out = 8'h58;
+                2'b10: databus_out = 8'h2c;
+                2'b11: databus_out = 8'h16;
             endcase
             nxt_state = CFG2;
         end
-        RX_READ: begin
-            nxt_state = TX_START;
-        end
-        TX_START: begin
+        CFG2: begin
             iorw = 0;
-            nxt_state = TX;
+            ioaddr = 2'b11;
+            case (br_cfg)
+                2'b00: databus_out = 8'h28;
+                2'b01: databus_out = 8'h14;
+                2'b10: databus_out = 8'h0a;
+                2'b11: databus_out = 8'h05;
+            endcase
+            if (rda) begin
+                nxt_state = RX_READ;
+            end
         end
         TX: begin
             iorw = 0;
-            if (tbr) nxt_state = IDLE;
-        end
-        CFG2: begin
-            ioaddr = 2'b11;
-            iorw = 0;
-            case (br_cfg)
-                2'b00: begin
-                    baud_cnt = 8'h28;
-                end
-                2'b01:begin
-                    baud_cnt = 8'h14;
-                end
-                2'b10: begin
-                    baud_cnt = 8'h0a;
-                end
-                2'b11: begin
-                    baud_cnt = 8'h05;
-                end
-            endcase
-            if (rda & tbr) begin
-                nxt_state = RX_READ;
-                iorw = 1;
-            end
+            databus_out = databus_in;
+            nxt_state = IDLE;
         end
     endcase
 end
+
+
 
 
 endmodule

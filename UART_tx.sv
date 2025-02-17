@@ -1,93 +1,111 @@
-`default_nettype none
-module UART_tx
-(
-input wire clk, rst_n,
-input wire trmt,
-input wire [7:0] tx_data,
-input wire [15:0] baud_val,
-output logic TX,
-output logic tx_done,
-output logic tx_rdy
+module UART_tx(
+    input [15:0] baud_val,
+    input clk, // clock signal
+    input rst_n, // active low reset
+    input trmt, // start a transmission
+    input [7:0] tx_data, // data to transmit
+    output TX, // output
+    output tx_rdy,
+    output reg tx_done // indicator that transmission is done
 );
+// define states, idle and transmission states
+typedef enum logic [1:0] {IDLE,  TX_ST} state_t;
 
-logic shift;
-logic init;
-logic transmitting;
-logic set_done;
-logic [8:0] tx_shft_reg;
-logic [16:0] baud_cnt;
-logic [3:0] bit_cnt;
+logic [3:0] bit_cnt; // Counts how many bits shifted
+logic [15:0] baud_cnt; // baud rate counter
+logic [8:0] tx_shft_reg; // shift register
+logic shift; // shift control signal
+logic init; // initiate a transmission
+logic set_done; // set tx_done
+logic transmitting; // for baud count increment
+state_t cur_state; // current state of SM
+state_t nxt_state; // next state
 
-//shift reg
-always_ff @(posedge clk, negedge rst_n)
-		if(!rst_n)
-			tx_shft_reg <= 9'h1FF;		// asynch set the shift register
-		else if(init)
-			tx_shft_reg <= {tx_data, 1'b0};		// append the data with a start bit
-		else if(shift)
-			tx_shft_reg <= {1'b1, tx_shft_reg[8:1]};		// shift in a 1
-			
-assign TX = tx_shft_reg[0];		// shift out the LSB of tx_shft_reg as TX output
+assign tx_rdy = (cur_state == IDLE);
 
-//baud counter
-always_ff @(posedge clk)
-		if(init|shift)
-			baud_cnt <= 16'h0000;		// reset the baud counter if init or shift is asserted
-		else if(transmitting)
-			baud_cnt <= baud_cnt + 1;		// count up when transmitting
-
-	assign shift = (baud_cnt == baud_val);		// assert shift when baud_cnt reaches 2604 clks
-	
-// the bit counter
-always_ff @(posedge clk)
-	if(init)
-		bit_cnt <= 4'h0;		// reset the bit counter if init is asserted
-	else if(shift)
-		bit_cnt <= bit_cnt + 1;		// count up when shifted a bit
-
-typedef enum reg { IDLE, TX_STATE } state_t;
-    state_t state, nxt_state;
-
-assign tx_rdy = (state==IDLE);
-// state change reg
-    always_ff @( posedge clk, negedge rst_n ) begin
-        if(!rst_n)
-            state <= IDLE;
-        else
-            state <= nxt_state;
+// flip flop block for bit cnt register
+// clear when init, increment when shift is asserted
+always_ff @(posedge clk) begin
+    if (init) begin
+        bit_cnt <= '0;
     end
-
-    always_comb begin
-        init = 1'b0;
-        transmitting = 1'b0;
-        set_done = 1'b0;
-        nxt_state = state;
-
-        case(state)
-			TX_STATE: begin
-				transmitting = 1'b1;
-				if(bit_cnt == 4'd10) begin		// finish transmission when all 10 bits are transmitted
-					set_done = 1'b1;
-					nxt_state = IDLE;
-				end
-			end
-			default:		
-				if(trmt) begin			// wait until trmt is asserted to begin transmission
-					init = 1'b1;
-					nxt_state = TX_STATE;
-				end
-		endcase
-	end
-
-//S/R reg to set tx_doness
-    always @(posedge clk, negedge rst_n) begin
-        if(!rst_n)
-            tx_done <= 1'b0;
-        else if(init)
-            tx_done <= 1'b0;
-        else if(set_done)
-            tx_done <= 1'b1;
+    else if (shift) begin
+        bit_cnt <= bit_cnt + 1;
     end
+end
+
+// flip flop block
+// clear when init or shift, count during bit transmitting
+always_ff @(posedge clk) begin
+    if (init | shift) begin
+        baud_cnt <= '0;
+    end
+    else if (transmitting) baud_cnt <= baud_cnt + 1;
+end
+
+// flip flop for tx_shift_reg
+// default all ones
+// shift in bits as UART protocol
+always_ff @(posedge clk, negedge rst_n) begin
+    if (~rst_n) begin
+        tx_shft_reg <= '1;
+    end
+    else if (init) begin
+        tx_shft_reg <= {tx_data, 1'b0};
+    end
+    else if (shift) begin
+        tx_shft_reg <= {1'b1, tx_shft_reg[8:1]};
+    end
+end
+// dataflow of TX
+assign TX = tx_shft_reg[0];
+
+// dataflow of shift
+assign shift = (baud_cnt == baud_val)?1'b1:1'b0;
+
+// tx_done register, asserted by set_done
+always_ff @(posedge clk, negedge rst_n) begin
+    if (~rst_n) tx_done <= 1'b0;
+    else tx_done <= (~init) & set_done;
+end
+
+// state flops
+always @(posedge clk, negedge rst_n) begin
+    if (~rst_n) cur_state <= IDLE;
+    else cur_state <= nxt_state;
+end
+
+// SM logic
+always_comb begin
+    // default values of control signals
+    set_done = 1'b1;
+    init = 1'b0;
+    transmitting = 1'b0;
+	 nxt_state = cur_state;
+    // combinational logic of state transitions
+    case (cur_state)
+        // in IDLE state, trmt moves to TX_ST and assert init
+        IDLE: if (trmt) begin
+            nxt_state = TX_ST;
+            init = 1'b1;
+        end
+        // handles when bit count is up or not yet
+        TX_ST: begin
+            if (bit_cnt != 10) begin
+                // keep transmitting when bit_cnt less than 10
+                transmitting = 1'b1;
+                nxt_state = TX_ST;
+                set_done = 1'b0;
+            end
+            else begin
+                // go back to IDLE when shifted 10 bits
+                nxt_state = IDLE;
+            end
+        end
+        default:
+            // state machines out of order, go back to IDLE
+            nxt_state = IDLE;
+    endcase
+end
 
 endmodule
-`default_nettype wire

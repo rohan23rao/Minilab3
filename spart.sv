@@ -29,28 +29,30 @@ module spart(
     output txd,
     input rxd
     );
-    
+
 // TX signals
 logic trmt;
-logic [7:0] tx_data;
 logic [7:0] rx_data;
 logic tx_done;
-logic rx_rdy;
 logic set_rda;
 
 logic [7:0] databus_out;
 logic [15:0] division_buffer;
-assign databus = (iorw) ? databus_out : 8'hzz;
-assign rda = rx_rdy | set_rda;
-assign set_rda = ((~ioaddr[1]) & iorw) ? (~ioaddr[0]) ? rx_rdy : 1 : 0;
 
-assign tx_data = (ioaddr == 2'b00 && !iorw) ?  databus : 0;
+logic clr_rdy;
+
+// databus
+assign databus = (iorw) ? databus_out : 8'bzzzzzzzz;
+
+// start transmission when tx_buffer is being written;
+assign trmt = (ioaddr == 2'b00) && (~iorw);
+assign clr_rdy = (ioaddr == 2'b00) && (iorw);
 
 UART_tx U_TX(
     .clk(clk), 
     .rst_n(rst),
-    .trmt((~iorw) & (tbr) & (~(|ioaddr))),
-    .tx_data(tx_data),
+    .trmt(trmt),
+    .tx_data(databus),
     .TX(txd),
     .tx_done(tx_done),
     .baud_val(division_buffer),
@@ -60,9 +62,9 @@ UART_tx U_TX(
 UART_rx U_RX(.clk(clk), 
              .rst_n(rst),
              .RX(rxd),
-             .clr_rdy(0), 
+             .clr_rdy(clr_rdy), 
              .rx_data(rx_data), 
-             .rdy(rx_rdy),
+             .rdy(rda),
              .baud_val(division_buffer)
 );
 
@@ -74,6 +76,7 @@ always_comb begin
                 databus_out = rx_data;
             end
             2'b01: begin
+                // not a functional line just to mimic register behavior
                 databus_out = {6'b000000, rda, tbr};
             end
             default: databus_out = 0;          
